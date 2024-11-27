@@ -1,0 +1,16 @@
+
+// start my sql container
+docker-compose -f mysql-compose.yml up
+
+// start kafka container
+docker-compose -f kafka-docker-compose.yml up
+
+
+// Swagger URI for command service
+http://localhost:8086/swagger-ui/index.html
+
+// Query service
+http://localhost:8085/product/query/all
+
+// kafka ui URI
+http://localhost:9021/clusters/Pbe3fASsQE2_2DW_ZnsxZA/management/topics/product-topic/message-viewer
