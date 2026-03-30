@@ -1,0 +1,157 @@
+name: Release Build and Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version type (patch, minor, major)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Get current version
+        id: version
+        run: |
+          CURRENT_VERSION=$(grep '<version>' pom.xml | head -1 | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
+          echo "Current version: $CURRENT_VERSION"
+          
+          BASE_VERSION=${CURRENT_VERSION%-SNAPSHOT}
+          IFS='.' read -ra PARTS <<< "$BASE_VERSION"
+          
+          case "${{ github.event.inputs.version_type }}" in
+            patch)
+              PARTS[2]=$((${PARTS[2]:-0} + 1))
+              ;;
+            minor)
+              PARTS[1]=$((${PARTS[1]:-0} + 1))
+              PARTS[2]=0
+              ;;
+            major)
+              PARTS[0]=$((${PARTS[0]:-0} + 1))
+              PARTS[1]=0
+              PARTS[2]=0
+              ;;
+          esac
+          
+          NEW_VERSION="${PARTS[0]}.${PARTS[1]}.${PARTS[2]}"
+          BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          GIT_COMMIT=${{ github.sha }}
+          GIT_BRANCH=${GITHUB_REF#refs/heads/}
+          
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          echo "git_commit=$GIT_COMMIT" >> $GITHUB_OUTPUT
+          echo "git_branch=$GIT_BRANCH" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+      
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      
+      - name: Update version in pom.xml
+        run: |
+          NEW_VERSION=${{ steps.version.outputs.new_version }}
+          mvn versions:set -DnewVersion=$NEW_VERSION -DprocessAllModules
+          mvn versions:commit
+      
+      - name: Create version.json for order-command-service
+        run: |
+          mkdir -p order-command-service/src/main/resources
+          cat > order-command-service/src/main/resources/version.json << 'EOF'
+          {
+            "application": "order-command-service",
+            "version": "${{ steps.version.outputs.new_version }}",
+            "buildTime": "${{ steps.version.outputs.build_time }}",
+            "gitCommit": "${{ steps.version.outputs.git_commit }}",
+            "gitBranch": "${{ steps.version.outputs.git_branch }}"
+          }
+          EOF
+      
+      - name: Create version.json for order-query-service
+        run: |
+          mkdir -p order-query-service/src/main/resources
+          cat > order-query-service/src/main/resources/version.json << 'EOF'
+          {
+            "application": "order-query-service",
+            "version": "${{ steps.version.outputs.new_version }}",
+            "buildTime": "${{ steps.version.outputs.build_time }}",
+            "gitCommit": "${{ steps.version.outputs.git_commit }}",
+            "gitBranch": "${{ steps.version.outputs.git_branch }}"
+          }
+          EOF
+      
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Build and push order-command-service
+        uses: docker/build-push-action@v4
+        with:
+          context: ./order-command-service
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/order-command-service:${{ steps.version.outputs.new_version }}
+            ${{ secrets.DOCKER_USERNAME }}/order-command-service:latest
+      
+      - name: Build and push order-query-service
+        uses: docker/build-push-action@v4
+        with:
+          context: ./order-query-service
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/order-query-service:${{ steps.version.outputs.new_version }}
+            ${{ secrets.DOCKER_USERNAME }}/order-query-service:latest
+      
+      - name: Commit and push version update
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add pom.xml order-command-service/pom.xml order-query-service/pom.xml
+          git add order-command-service/src/main/resources/version.json
+          git add order-query-service/src/main/resources/version.json
+          git commit -m "chore: Release version ${{ steps.version.outputs.new_version }}"
+          git push
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.version.outputs.new_version }}
+          release_name: Release ${{ steps.version.outputs.new_version }}
+          body: |
+            # Release ${{ steps.version.outputs.new_version }}
+            
+            ## Docker Images
+            - `${{ secrets.DOCKER_USERNAME }}/order-command-service:${{ steps.version.outputs.new_version }}`
+            - `${{ secrets.DOCKER_USERNAME }}/order-query-service:${{ steps.version.outputs.new_version }}`
+            
+            ## Build Information
+            - **Build Time**: ${{ steps.version.outputs.build_time }}
+            - **Git Commit**: ${{ steps.version.outputs.git_commit }}
+            - **Git Branch**: ${{ steps.version.outputs.git_branch }}
+          draft: false
+          prerelease: false
